@@ -22,6 +22,15 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
 
+// Health check endpoint for Railway
+Route::get('/health', function () {
+    return response()->json([
+        'status' => 'ok',
+        'timestamp' => now()->toISOString(),
+        'service' => 'e-commerce-backend'
+    ]);
+});
+
 Route::post('/signup', [AuthController::class, 'signup']);
 Route::get('/check-email', [AuthController::class, 'checkEmail']);
 Route::post('/login', [AuthController::class, 'login']);
