@@ -3,9 +3,9 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Cache;
+use CloudinaryLabs\CloudinaryLaravel\Facades\Cloudinary;
 use App\Models\Product;
 
 class ProductController extends Controller
@@ -15,36 +15,18 @@ class ProductController extends Controller
      */
     public function index()
     {
-        // Debug: Log the query
-        \Log::info('Fetching products...');
-        
-        // Clear cache for debugging
         Cache::forget('products_active');
-        
-        $products = Cache::remember('products_active', 3600, function () {
-            \Log::info('Cache miss, fetching from database...');
-            $allProducts = Product::all();
-            \Log::info('Total products in DB: ' . $allProducts->count());
-            
-            $activeProducts = Product::where('is_active', true)->orderBy('created_at', 'desc')->get();
-            \Log::info('Active products count: ' . $activeProducts->count());
-            
-            // Log each product's status
-            foreach ($allProducts as $product) {
-                \Log::info('Product: ' . $product->name . ', is_active: ' . $product->is_active);
-            }
-            
-            return $activeProducts;
-        });
 
-        \Log::info('Final products count: ' . $products->count());
+        $products = Cache::remember('products_active', 3600, function () {
+            return Product::where('is_active', true)->orderBy('created_at', 'desc')->get();
+        });
 
         return response()->json([
             'success' => true,
             'data' => $products->map(function ($product) {
                 $hasSale = !is_null($product->sale_price) && $product->sale_price < $product->price;
                 $currentPrice = $hasSale ? $product->sale_price : $product->price;
-                
+
                 return [
                     'id' => $product->id,
                     'name' => $product->name,
@@ -55,8 +37,8 @@ class ProductController extends Controller
                     'current_price' => $currentPrice,
                     'has_sale' => $hasSale,
                     'stock' => $product->stock,
-                    'main_image' => $product->main_image_url,
-                    'additional_images' => $product->additional_images_urls,
+                    'main_image' => $product->main_image,
+                    'additional_images' => $product->additional_images ?? [],
                     'is_active' => $product->is_active,
                     'created_at' => $product->created_at,
                     'updated_at' => $product->updated_at
@@ -77,9 +59,9 @@ class ProductController extends Controller
             'price' => 'required|numeric|min:0',
             'sale_price' => 'nullable|numeric|min:0',
             'stock' => 'required|integer|min:0',
-            'main_image' => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'main_image' => 'required|image|mimes:jpeg,png,jpg,gif,webp|max:5120',
             'additional_images' => 'nullable|array',
-            'additional_images.*' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'additional_images.*' => 'nullable|image|mimes:jpeg,png,jpg,gif,webp|max:5120',
             'is_active' => 'required|boolean'
         ]);
 
@@ -92,22 +74,20 @@ class ProductController extends Controller
         }
 
         try {
-            // Debug: Log request data
-            \Log::info('Product creation request:', [
-                'all_data' => $request->all(),
-                'has_main_image' => $request->hasFile('main_image'),
-                'has_additional_images' => $request->hasFile('additional_images'),
-                'additional_images_count' => $request->hasFile('additional_images') ? count($request->file('additional_images')) : 0
-            ]);
+            // Upload main image to Cloudinary
+            $mainImageUrl = Cloudinary::upload(
+                $request->file('main_image')->getRealPath(),
+                ['folder' => 'products']
+            )->getSecurePath();
 
-            // Handle main image upload
-            $mainImagePath = $request->file('main_image')->store('products', 'public');
-
-            // Handle additional images
+            // Upload additional images to Cloudinary
             $additionalImages = [];
             if ($request->hasFile('additional_images')) {
                 foreach ($request->file('additional_images') as $image) {
-                    $additionalImages[] = $image->store('products', 'public');
+                    $additionalImages[] = Cloudinary::upload(
+                        $image->getRealPath(),
+                        ['folder' => 'products']
+                    )->getSecurePath();
                 }
             }
 
@@ -118,10 +98,12 @@ class ProductController extends Controller
                 'price' => $request->price,
                 'sale_price' => $request->sale_price,
                 'stock' => $request->stock,
-                'main_image' => $mainImagePath,
+                'main_image' => $mainImageUrl,
                 'additional_images' => $additionalImages,
                 'is_active' => $request->boolean('is_active', true)
             ]);
+
+            Cache::forget('products_active');
 
             return response()->json([
                 'success' => true,
@@ -132,19 +114,14 @@ class ProductController extends Controller
                     'short_description' => $product->short_description,
                     'price' => $product->price,
                     'sale_price' => $product->sale_price,
-                    'current_price' => $product->current_price,
-                    'has_sale' => $product->has_sale,
                     'stock' => $product->stock,
-                    'main_image' => $product->main_image_url,
-                    'additional_images' => $product->additional_images_url,
+                    'main_image' => $product->main_image,
+                    'additional_images' => $product->additional_images ?? [],
                     'is_active' => $product->is_active,
                     'created_at' => $product->created_at,
                     'updated_at' => $product->updated_at
                 ]
             ], 201);
-
-            // Clear product caches
-            Cache::forget('products_active');
 
         } catch (\Exception $e) {
             return response()->json([
@@ -163,7 +140,7 @@ class ProductController extends Controller
         $product = Cache::remember("product_{$id}", 3600, function () use ($id) {
             return Product::find($id);
         });
-        
+
         if (!$product) {
             return response()->json([
                 'success' => false,
@@ -172,7 +149,6 @@ class ProductController extends Controller
         }
 
         $hasSale = !is_null($product->sale_price) && $product->sale_price < $product->price;
-        $currentPrice = $hasSale ? $product->sale_price : $product->price;
 
         return response()->json([
             'success' => true,
@@ -183,11 +159,11 @@ class ProductController extends Controller
                 'long_description' => $product->long_description,
                 'price' => $product->price,
                 'sale_price' => $product->sale_price,
-                'current_price' => $currentPrice,
+                'current_price' => $hasSale ? $product->sale_price : $product->price,
                 'has_sale' => $hasSale,
                 'stock' => $product->stock,
-                'main_image' => $product->main_image_url,
-                'additional_images' => $product->additional_images_urls,
+                'main_image' => $product->main_image,
+                'additional_images' => $product->additional_images ?? [],
                 'is_active' => $product->is_active,
                 'created_at' => $product->created_at,
                 'updated_at' => $product->updated_at
@@ -216,8 +192,9 @@ class ProductController extends Controller
             'price' => 'sometimes|required|numeric|min:0',
             'sale_price' => 'sometimes|nullable|numeric|min:0',
             'stock' => 'sometimes|required|integer|min:0',
-            'main_image' => 'sometimes|required|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'additional_images.*' => 'sometimes|nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'main_image' => 'sometimes|image|mimes:jpeg,png,jpg,gif,webp|max:5120',
+            'additional_images' => 'sometimes|nullable|array',
+            'additional_images.*' => 'sometimes|image|mimes:jpeg,png,jpg,gif,webp|max:5120',
             'is_active' => 'sometimes|boolean'
         ]);
 
@@ -230,52 +207,49 @@ class ProductController extends Controller
         }
 
         try {
-            // Debug image handling
-            \Log::info('Request method: ' . $request->method());
-            \Log::info('Request content type: ' . $request->header('Content-Type'));
-            \Log::info('Request has main image: ' . ($request->hasFile('main_image') ? 'Yes' : 'No'));
-            \Log::info('Request all files: ' . json_encode($request->allFiles()));
-            \Log::info('Request all input: ' . json_encode($request->all()));
-            
             $updateData = $request->only([
-                'name', 'short_description', 'long_description', 
+                'name', 'short_description', 'long_description',
                 'price', 'sale_price', 'stock', 'is_active'
             ]);
 
             // Handle main image update
             if ($request->hasFile('main_image')) {
-                \Log::info('Processing main image update');
-                // Delete old main image
+                // Delete old image from Cloudinary
                 if ($product->main_image) {
-                    Storage::disk('public')->delete($product->main_image);
+                    $publicId = $this->getCloudinaryPublicId($product->main_image);
+                    if ($publicId) Cloudinary::destroy($publicId);
                 }
-                $updateData['main_image'] = $request->file('main_image')->store('products', 'public');
-                \Log::info('New main image stored: ' . $updateData['main_image']);
-            } else {
-                \Log::info('No main image in request');
+
+                $updateData['main_image'] = Cloudinary::upload(
+                    $request->file('main_image')->getRealPath(),
+                    ['folder' => 'products']
+                )->getSecurePath();
             }
 
             // Handle additional images update
             if ($request->hasFile('additional_images')) {
-                \Log::info('Processing additional images update');
-                // Delete old additional images
+                // Delete old additional images from Cloudinary
                 if ($product->additional_images) {
                     foreach ($product->additional_images as $oldImage) {
-                        Storage::disk('public')->delete($oldImage);
+                        $publicId = $this->getCloudinaryPublicId($oldImage);
+                        if ($publicId) Cloudinary::destroy($publicId);
                     }
                 }
 
                 $additionalImages = [];
                 foreach ($request->file('additional_images') as $image) {
-                    $additionalImages[] = $image->store('products', 'public');
+                    $additionalImages[] = Cloudinary::upload(
+                        $image->getRealPath(),
+                        ['folder' => 'products']
+                    )->getSecurePath();
                 }
                 $updateData['additional_images'] = $additionalImages;
-                \Log::info('New additional images stored: ' . json_encode($additionalImages));
-            } else {
-                \Log::info('No additional images in request');
             }
 
             $product->update($updateData);
+
+            Cache::forget('products_active');
+            Cache::forget("product_{$id}");
 
             return response()->json([
                 'success' => true,
@@ -286,20 +260,14 @@ class ProductController extends Controller
                     'short_description' => $product->short_description,
                     'price' => $product->price,
                     'sale_price' => $product->sale_price,
-                    'current_price' => $product->current_price,
-                    'has_sale' => $product->has_sale,
                     'stock' => $product->stock,
-                    'main_image' => $product->main_image_url,
-                    'additional_images' => $product->additional_images_url,
+                    'main_image' => $product->main_image,
+                    'additional_images' => $product->additional_images ?? [],
                     'is_active' => $product->is_active,
                     'created_at' => $product->created_at,
                     'updated_at' => $product->updated_at
                 ]
             ], 200);
-
-            // Clear product caches
-            Cache::forget('products_active');
-            Cache::forget("product_{$id}");
 
         } catch (\Exception $e) {
             return response()->json([
@@ -325,21 +293,22 @@ class ProductController extends Controller
         }
 
         try {
-            // Delete main image
+            // Delete main image from Cloudinary
             if ($product->main_image) {
-                Storage::disk('public')->delete($product->main_image);
+                $publicId = $this->getCloudinaryPublicId($product->main_image);
+                if ($publicId) Cloudinary::destroy($publicId);
             }
 
-            // Delete additional images
+            // Delete additional images from Cloudinary
             if ($product->additional_images) {
                 foreach ($product->additional_images as $image) {
-                    Storage::disk('public')->delete($image);
+                    $publicId = $this->getCloudinaryPublicId($image);
+                    if ($publicId) Cloudinary::destroy($publicId);
                 }
             }
 
             $product->delete();
 
-            // Clear product caches
             Cache::forget('products_active');
             Cache::forget("product_{$id}");
 
@@ -354,6 +323,25 @@ class ProductController extends Controller
                 'message' => 'Failed to delete product',
                 'error' => $e->getMessage()
             ], 500);
+        }
+    }
+
+    /**
+     * Extract Cloudinary public ID from a secure URL.
+     * e.g. https://res.cloudinary.com/demo/image/upload/v123/products/abc.jpg
+     * returns: products/abc
+     */
+    private function getCloudinaryPublicId(string $url): ?string
+    {
+        try {
+            $path = parse_url($url, PHP_URL_PATH);
+            // Remove /image/upload/vXXXXXX/ prefix
+            $path = preg_replace('/\/image\/upload\/v\d+\//', '/', $path);
+            // Remove file extension
+            $publicId = preg_replace('/\.[^.]+$/', '', ltrim($path, '/'));
+            return $publicId ?: null;
+        } catch (\Exception $e) {
+            return null;
         }
     }
 }
